@@ -1,0 +1,12 @@
+postgres:
+ image : postgres:9.6-alpine
+ ports : 
+  - '5432:5432'
+ environment:
+  POSTGRES_USER : 'user'
+  POSTGRES_PASSWORD : 'B0ur_B0n!'
+  POSTGRES_DB : 'CFP'
+ volumes:
+  - data:/Users/mike/CFP/postgres/data
+#  - ./init:docker-entrypoint-initdb.d/
+# sudo docker-compose -f docker-compose.yml up
