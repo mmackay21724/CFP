@@ -1,0 +1,8 @@
+.vscode
+.installed.cfg
+ssl/*
+mysql/*
+dist
+lib64
+*.pyc
+*.pyo
