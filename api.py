@@ -5,6 +5,7 @@ from flask import Flask,  Request, jsonify, request
 from flask_restful import reqparse, abort, Api, Resource
 import socket
 import mysql.connector
+import xlrd
 
 #mysqlConnect = {'host' : '10.10.30.130',  'user': 'root' , 'password' :"peaceD00d", 'database' : 'cfp', 'port' : '3306', 'use_pure' : True}
 cnx     = mysql.connector.connect(user='root', password="peaceD00d", database='cfp', host= '10.10.30.130', port = '3306', use_pure = True)
@@ -53,6 +54,22 @@ def _getDataFields():
     cursor.execute(query)
     return cursor.fetchall()
 
+def _importXLS(fileName):
+    workbook = xlrd.open_workbook(fileName, on_demand=True)
+    worksheet = workbook.sheet_by_index(0)
+    first_row = []  # The row where we stock the name of the column
+    for col in range(worksheet.ncols):
+        first_row.append(worksheet.cell_value(0, col))
+    # transform the workbook to a list of dictionaries
+    data = []
+    for row in range(1, worksheet.nrows):
+        elm = {}
+        for col in range(worksheet.ncols):
+            elm[first_row[col]] = worksheet.cell_value(row, col)
+        data.append(elm)
+    return data
+
+
 # -----
 #  TESTED AND GOOD
 # -------
@@ -65,7 +82,7 @@ class CFP_data(Resource):
     def get(self, event_id):
         return (self._getCfpData(event_id)), 201
 
-    def post(self, event_id):
+    def post(self):
         self.content = request.get_json()
         return self._genSQL()
 
@@ -90,9 +107,13 @@ class CFP_data(Resource):
             updateValues = tuple(temp)
             if len(updateFields) > 0 :
                 sql ="UPDATE cfp_data SET {_fields} WHERE CFP_session_ID = %s".format(_fields = ", ".join(updateFields))
-                print(sql)
-                print (updateValues)
+                #print(sql)
+                #print (updateValues)
                 cursor.execute(sql, updateValues)
+                auditSql  = "INSERT INTO audit ('data', 'sql', 'userid') VALUES (%s, %s, %s)"
+                auditData = (updateValues, sql, "system")
+#                cursor.execute(auditSql,  auditData)
+
                 cnx.commit()
                 print("affected rows = {}".format(cursor.rowcount))
 
@@ -142,6 +163,7 @@ class CFP_data(Resource):
         #print (cfpSchema)
 
         #cfpDataQuery = "select {df} from cfp_all_data where event_id ={eventID} and CFP_session_code = '1120' ".format(df=(",".join(dataFields["label"])), eventID="1")
+        #print ( ",".join(dataFields["label"]) )
         cfpDataQuery = "select {df} from cfp_data where event_id ={eventID} ".format(df=(",".join(dataFields["label"])), eventID=event_id)
 
         #print (cfpDataQuery)
@@ -163,8 +185,10 @@ class CFP_data(Resource):
                     cfpD[val] = ''
                 #print ("idx -->" + str(idx) + "   VAL -- " + val + "cfpD[val] -- " + cfpD[val] )
                 #print (dataFields["label"][i] + "--" + dataFields["type"][i])
+
                 z["value"]      = cfpD[val]
                 z["cellType"]   = dataFields["type"][idx]
+                z["fieldName"]  = (dataFields["label"][idx])
                 zList.append(z)
                 #print (z)
                 #exit()
@@ -179,6 +203,91 @@ class CFP_data(Resource):
             retDict.update ( {v["field_name"] : v["editable"]})
         #print  (retDict)
         return retDict
+
+class Data_Import(Resource):
+
+    def __init__(self):
+        pass
+
+    def post(self):
+        self.content = request.get_json()
+        #file = "CFP_Data/cfp2.xlsx"
+        #data = _importXLS(file)
+        #print (self.content)
+        self._loadData(self.content)
+
+    def _loadData(self, data):
+        dbFields = self._getDbFields("cfp", "cfp_data")
+        sqlInsertFields = ["CFP_Speaker", "CFP_Speaker_email", "CFP_Session_submitter"]
+        sqlInsertValues = []
+        sqlUpdate = ["CFP_Speaker = VALUES(CFP_Speaker)",
+                     "CFP_Speaker_email = VALUES(CFP_Speaker_email)",
+                     "CFP_Session_submitter = VALUES(CFP_Session_submitter)"
+                     ]
+        paramterStr = ['%s', '%s', '%s']
+
+        for idx, val in enumerate(data):
+
+            if (("CFP_Session_ID" not in val) or (val["CFP_Session_ID"] == '') or ("CFP_Event_name" not in val) or (
+                        val["CFP_Event_name"] == '')):
+                print (str(idx))
+                # exit(str(idx) + "  -->  " + str(val) )
+            # print (str(idx) + "..." + str(val))
+            else:
+                temp = []
+                _grpParticipants = val["CFP_Grp_participants"].split(";")
+                speakers = []
+                speaker_email = []
+                session_sub = []
+
+                for grpIdx, grpVal in enumerate(_grpParticipants):
+                    # print(grpVal)
+                    if grpVal.find("(Speaker)") != -1:
+                        speakers.append(grpVal.split(',')[0].strip())
+                        speaker_email.append(grpVal.split(',')[1].strip())
+
+                    if grpVal.find(" (Session Submitter)") != -1:
+                        session_sub.append(grpVal.split(',')[0].strip())
+                        # speaker_email.append(grpVal.split(',')[1].strip())
+                temp.append(", ".join(speakers))
+                temp.append(", ".join(speaker_email))
+                temp.append(", ".join(session_sub))
+                # print (speaker_email + "..." + str(len(speaker_email)))
+
+                for i, v in enumerate(val):
+                    # print ("i = " + str(i) + "   v=" + v + "    Value = " + str(val[v]))
+                    if v in dbFields:
+                        temp.append(val[v])
+                        # print (val[v])
+                        # exit(val)
+                        if idx == 0:
+                            sqlInsertFields.append(v)
+                            paramterStr.append('%s')
+                            sqlUpdate.append("{_field} = VALUES({_field}) ".format(_field=v))
+
+                sqlInsertValues.append(tuple(temp))
+        sql = (
+        'INSERT INTO cfp_data ({_insertFields}) VALUES ({_insertValues}) ON DUPLICATE KEY UPDATE {_update}'.format
+        (_insertFields=", ".join(sqlInsertFields), _insertValues=", ".join(paramterStr), _update=", ".join(sqlUpdate)))
+
+        # print (sqlInsertValues)
+        # print (sql)
+        eventSQL = "update cfp_data  c set event_id = (select event_id from events e where e.event_name = c.CFP_Event_name)"
+
+        result = c_many.executemany(sql, tuple(sqlInsertValues))
+        cursor.execute(eventSQL)
+        print (result)
+        cnx.commit()
+
+    def _getDbFields(self, schema, table):
+        query = "SELECT COLUMN_NAME FROM information_schema.columns where table_schema = '{_schema}' and table_name = '{_table}'".format(
+            _schema=schema, _table=table)
+        cursor.execute(query)
+        d = cursor.fetchall()
+        ret = {}
+        for i, v in enumerate(d):
+            ret[v["COLUMN_NAME"]] = ''
+        return ret
 
 class Events(Resource):
 
@@ -246,84 +355,15 @@ class Lookups(Resource):
         return cursor.fetchall(), 201
 
 
-#-----
-#  WIP
-# -------
-class EventUpdate_old(Resource):
-
-    def __init__(self):
-        pass
-
-    def post(self, event_id):
-        # Insert new record into the Events Table - get new ID
-        sql = ("UPDATE events SET ett_id = '{_ett_id}', rainfocus_api = '{_api}', event_name ='{_name} ,status = '{_status}' WHERE event_id = {_event_id}"
-               .format(_ett_id=self.content["event"]["ett_id"],
-                       _api=self.content["event"]["rainfocus_api"],
-                       _name=self.content["event"]["event_name"],
-                       _status=self.content["event"]["status"],
-                       _event_id = event_id))
-        print (sql)
-        cursor.execute(sql)
-        cnx.commit()
-        _new_event_id = cursor.lastrowid
-        # Now add the resources:
-        if (self.content["resources"])  and (len(self.content["resources"]) > 0):
-            for k in self.content["resources"]:
-                #print ( "k-->" + str(k))
-                sql = ( "UPDATE event_resources SET resource_name='{_rn}', resource_type='{_rt}', session_count='{_sc}', capacity= '{_cap}' WHERE event_id='{_id}'"
-                    .format(_rn= k["resource_name"],
-                            _rt= k["resource_type"],
-                            _sc= k["session_count"],
-                            _cap=k["capacity"],
-                            _id=_new_event_id))
-                #print (sql)
-                cursor.execute(sql)
-                cnx.commit()
-        return (_getEventInfo(event_id)), 201
-
-class _UPDATE_CFP(Resource):
-    def __init__(self):
-            self.content = request.get_json()
-
-    def _generateEditableDict (self, d):
-        retDict = {}
-        for i, v in enumerate(d):
-            retDict.update ( {v["field_name"] : v["editable"]})
-        #print  (retDict)
-        return retDict
-
-    def _genSQL(self):
-        dataFields = _getDataFields()
-        editableFields = self._generateEditableDict(dataFields)
-        #print (dataFields)
-        for recordIdx, recordVal in enumerate(self.content):
-            returnSQL = 'UPDATE cfp_data SET '
-            comma = " "
-            if  "CFP_session_code" not in recordVal:
-                return "Missing primary key", 422
-            for k, v in recordVal.items():
-                #print (str(k) + "..." + v + "...." + editableFields[k])
-                if  k in editableFields and editableFields[k] == 'true' :
-                    returnSQL = returnSQL + "{_comma} {_field} = '{_value}' ".format(_field = k, _value = v, _comma = comma)
-                    comma = ", "
-            returnSQL = returnSQL + " WHERE CFP_session_code = '{_id}'".format(_id = recordVal["CFP_session_code"])
-            print(returnSQL)
-            cursor.execute(returnSQL)
-            cnx.commit()
-        return (len(self.content))
-#        return "hi"
-
-    def post(self):
-        return self._genSQL()
-
 
 #######     ------------
 #######     ROUTES
 #######     ------------
 
-api.add_resource(CFP_data,      '/api/ver1/cfpdata/<event_id>')                         # GET   - pulls the data for a specific event.  PUT = inserts.  POST UPDATES.
-api.add_resource(Events,        '/api/ver1/events/', '/api/ver1/events/<event_id>')     # GET   - a specific event details.   PUT a new record.  This also includes the resources for the event
-api.add_resource(Lookups,       '/api/ver1/lookups', '/api/ver1/lookups/<type>' )   # GET  - Gets a list of all the dropdowns...
+api.add_resource(CFP_data,      '/api/ver1/cfpdata/<event_id>', '/api/ver1/cfpdata')   # GET   - pulls the data for a specific event.  PUT = inserts.  POST UPDATES.
+api.add_resource(Data_Import,   '/api/ver1/cfpdata/import')                             # POST.  Takes data from XLS file and merhges into the CFP_DATA table
+api.add_resource(Events,        '/api/ver1/events/')                                    # GET   - a specific event details.   PUT a new record.  This also includes the resources for the event
+api.add_resource(Lookups,       '/api/ver1/lookups', '/api/ver1/lookups/<type>' )       # GET  - Gets a list of all the dropdowns...
 
 if __name__ == '__main__':
     app.run(debug=True,  host=HOST, port=PORT)
