@@ -6,3 +6,4 @@ dist
 lib64
 *.pyc
 *.pyo
+node_modules/*

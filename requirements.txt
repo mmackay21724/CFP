@@ -1,0 +1,7 @@
+requests
+uwsgi
+flask_restplus
+Flask-BasicAuth
+mysql-connector-python
+xlrd
+flask_restful
